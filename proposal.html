@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Parallel MaxSAT Solver</title>
+  <title>Project Proposal - Parallel MaxSAT Solver</style>
 
   <style>
     body {
@@ -26,27 +26,41 @@
 
     header p {
       font-size: 18px;
-      opacity: 0.9;
+    }
+
+    nav {
+      text-align: center;
+      margin: 20px;
+    }
+
+    nav a {
+      margin: 10px;
+      text-decoration: none;
+      color: #3498db;
+      font-weight: bold;
+    }
+
+    nav a:hover {
+      text-decoration: underline;
     }
 
     .container {
-      max-width: 900px;
-      margin: 30px auto;
-      padding: 0 20px;
+      max-width: 950px;
+      margin: auto;
+      padding: 20px;
     }
 
     section {
       background: white;
-      padding: 25px 30px;
+      padding: 25px;
       margin-bottom: 25px;
       border-radius: 12px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      box-shadow: 0 4px 10px rgba(0,0,0,0.08);
     }
 
     h2 {
       font-size: 28px;
       color: #2c3e50;
-      margin-bottom: 15px;
     }
 
     h3 {
@@ -55,7 +69,6 @@
     }
 
     p {
-      font-size: 16px;
       line-height: 1.7;
     }
 
@@ -63,21 +76,6 @@
       margin-left: 20px;
       line-height: 1.7;
     }
-
-    a {
-      color: #3498db;
-      text-decoration: none;
-    }
-
-    a:hover {
-      text-decoration: underline;
-    }
-
-    .authors {
-      margin-top: 10px;
-      font-size: 16px;
-    }
-
   </style>
 </head>
 
@@ -86,15 +84,19 @@
 <header>
   <h1>Parallel Maximum Satisfiability Solver</h1>
   <p>Aitong (Ivy) Li &nbsp;•&nbsp; Ananya Aggarwal</p>
-  <p><a href="https://aitongl.github.io/" style="color: #aad8ff;">Project Website</a></p>
+  <p>https://aitongl.github.io/</p>
 </header>
+
+<nav>
+  <a href="index.html">Home</a>
+</nav>
 
 <div class="container">
 
 <section>
 <h2>Summary</h2>
 <p>
-We will build a parallel Maximum Satisfiability (MaxSAT) solver by starting from a sequential CDCL SAT solver and implementing a core-guided MaxSAT algorithm on top of it.
+We will build a parallel Maximum Satisfiability (MaxSAT) solver by starting from a sequential CDCL SAT solver and implementing a core-guided MaxSAT algorithm on top of it. Our system will expose solver internals such as learned clauses and conflicts, and then introduce parallelism at the MaxSAT level by coordinating multiple workers.
 </p>
 <p>
 Workers will explore different parts of the search while selectively sharing useful information such as unsatisfiable cores, bounds, and high-quality learned clauses to reduce redundant computation.
@@ -104,41 +106,58 @@ Workers will explore different parts of the search while selectively sharing use
 <section>
 <h2>Background</h2>
 <p>
-Maximum Satisfiability (MaxSAT) extends SAT by allowing some clauses to be “soft” and maximizing satisfied clauses.
+Maximum Satisfiability (MaxSAT) extends SAT by allowing some clauses to be “soft” and seeking an assignment that maximizes the number of satisfied clauses.
 </p>
 
-<p><strong>Sequential algorithm:</strong></p>
+<p>
+Maximum satisfiability is an NP-complete problem, meaning solving it efficiently could help solve many real-world problems such as the traveling salesman problem.
+</p>
+
+<p>
+We aim to design a parallel MaxSAT solver using communication protocols such as OpenMP and experiment with different communication strategies.
+</p>
+
+<h3>Sequential Algorithm</h3>
 <ul>
   <li>Initialize bounds and relaxation variables</li>
   <li>Repeat:
     <ul>
-      <li>Call SAT solver</li>
-      <li>If satisfiable → update solution</li>
-      <li>If unsatisfiable → relax core</li>
+      <li>Call SAT solver under current assumptions</li>
+      <li>If satisfiable: update best solution and bounds</li>
+      <li>If unsatisfiable: extract unsat core and relax it</li>
     </ul>
   </li>
   <li>Until convergence</li>
 </ul>
 
 <p>
-The repeated SAT solving makes this problem computationally expensive but well-suited for parallelism.
+The main bottleneck is repeated SAT solving, which makes this problem well-suited for parallelism, though coordination between workers is required.
 </p>
 </section>
 
 <section>
 <h2>The Challenge</h2>
 <p>
-MaxSAT has strong dependencies across iterations, making naive parallelization ineffective.
+MaxSAT has strong dependencies across iterations. Each SAT call depends on previously learned cores, making naive parallelization ineffective.
 </p>
+
 <p>
-A key challenge is deciding what information to share between workers without overwhelming communication overhead.
+Another challenge is deciding what information to share. Sharing too much increases overhead, while sharing too little reduces the benefits of parallelism.
+</p>
+
+<p>
+The workload involves irregular control flow, communication overhead, and potential load imbalance between workers.
 </p>
 </section>
 
 <section>
 <h2>Resources</h2>
 <p>
-We will build on the Glucose SAT solver and modify it to expose internals such as learned clauses and conflicts.
+We will use the open-source Glucose SAT solver as a base and modify it to expose internals such as learned clauses and conflicts.
+</p>
+
+<p>
+We will also use industry-standard benchmarks and PSC cluster resources for evaluation.
 </p>
 </section>
 
@@ -147,42 +166,68 @@ We will build on the Glucose SAT solver and modify it to expose internals such a
 
 <h3>Core Goals</h3>
 <ul>
-  <li>Parallel MaxSAT solver</li>
-  <li>Worker communication protocols</li>
-  <li>Benchmark evaluation</li>
+  <li>Implement a parallel MaxSAT solver</li>
+  <li>Design communication protocols between workers</li>
+  <li>Evaluate performance on benchmark datasets</li>
 </ul>
 
 <h3>Metrics</h3>
 <ul>
-  <li>Speedup vs baseline</li>
-  <li>Scalability</li>
-  <li>Communication impact</li>
+  <li>Speedup vs sequential baseline</li>
+  <li>Scalability across cores</li>
+  <li>Impact of communication frequency</li>
 </ul>
 
 <h3>Extended Goals</h3>
 <ul>
   <li>Compare communication strategies</li>
-  <li>Load balancing</li>
-  <li>Selective clause sharing</li>
+  <li>Implement load balancing</li>
+  <li>Explore selective clause sharing</li>
 </ul>
 
+<h3>Minimum Deliverable</h3>
+<p>
+A correct sequential solver and a basic parallel version with limited communication and evaluation.
+</p>
+</section>
+
+<section>
+<h2>What We Aim to Learn</h2>
+<p>
+We aim to understand how much of MaxSAT can be parallelized, what information sharing is most effective, and how communication impacts performance.
+</p>
+
+<p>
+We will also study how solver internals influence parallel efficiency.
+</p>
+</section>
+
+<section>
+<h2>System Capabilities and Expected Performance</h2>
+<p>
+The system will support coordinated parallel solving with configurable communication strategies.
+</p>
+
+<p>
+We expect improved performance over sequential solvers on larger instances, though not linear scaling due to dependencies.
+</p>
 </section>
 
 <section>
 <h2>Platform Choice</h2>
 <p>
-C++ with the Glucose solver and OpenMP/thread-based parallelism on PSC systems.
+We will use C++ with the Glucose solver and OpenMP/thread-based parallelism on PSC systems.
 </p>
 </section>
 
 <section>
 <h2>Schedule</h2>
 <ul>
-  <li><strong>Week 1:</strong> Setup + basic parallel version</li>
-  <li><strong>Week 2:</strong> Communication + benchmarking</li>
-  <li><strong>Week 3:</strong> Optimization + results</li>
+  <li><strong>Week 1:</strong> Setup and baseline implementation</li>
+  <li><strong>Week 2:</strong> Communication design and benchmarking</li>
+  <li><strong>Week 3:</strong> Optimization and evaluation</li>
   <li><strong>Week 4:</strong> Scaling experiments</li>
-  <li><strong>Week 5:</strong> Final report</li>
+  <li><strong>Week 5:</strong> Final report and results</li>
 </ul>
 </section>
 
