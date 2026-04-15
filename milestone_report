@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parallel Maximum Satisfiability Solver — Milestone Report</title>
+<style>
+  body {
+    font-family: serif;
+    max-width: 860px;
+    margin: 40px auto;
+    padding: 0 24px;
+    line-height: 1.6;
+    color: #111;
+  }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  h2 { font-size: 18px; margin-top: 32px; margin-bottom: 8px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  h3 { font-size: 15px; margin-top: 16px; margin-bottom: 6px; }
+  .authors { color: #555; margin-bottom: 24px; }
+  ul { margin: 8px 0 8px 24px; }
+  li { margin-bottom: 4px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #bbb; padding: 6px 12px; text-align: left; }
+  th { background: #f0f0f0; }
+  p { margin: 8px 0; }
+  .section { margin-bottom: 28px; }
+</style>
+</head>
+<body>
+
+<h1>Parallel Maximum Satisfiability Solver</h1>
+<div class="authors">
+  Aitong (Ivy) Li &nbsp;&amp;&nbsp; Ananya Aggarwal &nbsp;|&nbsp;
+  <a href="https://aitongl.github.io/">aitongl.github.io</a>
+</div>
+
+<div class="section">
+  <h2>Goals and Deliverables</h2>
+
+  <h3>Core Goals</h3>
+  <ul>
+    <li>&#9989; Understand Glucose code base.</li>
+    <li>&#9989; Implement a baseline sequential implementation of MaxSAT using the Glucose SAT solver. Test it on the industry standard benchmarks.</li>
+    <li>&#9989; Implement a baseline parallel MaxSAT solver by running multiple SAT solver instances in parallel on different parts of the search space.</li>
+    <li>&#9744; Design a more sophisticated parallel algorithm that shares clauses and other internal information using OpenMP.</li>
+    <li>&#9744; Evaluate performance on standard benchmark instances (e.g., SATLIB / MaxSAT benchmarks) using PSC cluster resources.</li>
+    <li>&#9744; Measure speedup vs. sequential baseline and scalability across cores/processors.</li>
+  </ul>
+
+  <h3>Extended Goals</h3>
+  <ul>
+    <li>&#9744; Compare multiple communication strategies: no communication, periodic clause sharing, adaptive/selective clause sharing.</li>
+    <li>&#9744; Implement simple load balancing or work-stealing to improve utilization.</li>
+    <li>&#9744; Explore heuristics for deciding what information to share (e.g., only high-quality learned clauses).</li>
+  </ul>
+</div>
+
+<div class="section">
+  <h2>Half-Week Breakdown</h2>
+
+  <h3>Apr 13–16 <small>(Responsible: Ivy)</small></h3>
+  <ul>
+    <li>Understand why the current baseline parallel MaxSAT is performing worse on multiple cores.</li>
+    <li>Select a better set of benchmarks with room for parallelism. Rerun testing for previous approaches.</li>
+  </ul>
+
+  <h3>Apr 17–19 <small>(Responsible: Ananya)</small></h3>
+  <ul>
+    <li>Use insights from the analysis to implement a sophisticated parallel algorithm with clause and internal information sharing.</li>
+    <li>Brainstorm alternative approaches in case clause sharing does not provide significant speedup. If speedup is hard to achieve, consider sacrificing correctness for better throughput.</li>
+  </ul>
+
+  <h3>Apr 20–23 <small>(Responsible: Ivy)</small></h3>
+  <ul>
+    <li>Iterate on the algorithm to maximize performance.</li>
+    <li>Potentially explore extended goals such as heuristics for sharing only high-quality learned clauses.</li>
+  </ul>
+
+  <h3>Apr 24–26 <small>(Responsible: Ivy)</small></h3>
+  <ul>
+    <li>Record speedups and data on GHC and PSC machines using a selected subset of standard benchmarks.</li>
+    <li>Measure: speedup vs. sequential baseline, scalability across cores/processors, and accuracy if sacrificed.</li>
+  </ul>
+
+  <h3>Apr 27–30</h3>
+  <ul>
+    <li>Write up the prose of the report. <em>(Responsible: Ananya)</em></li>
+    <li>Generate plots and tables for the report. <em>(Responsible: Ivy)</em></li>
+    <li>Clean up code for submission and ease of understanding.</li>
+  </ul>
+</div>
+
+<div class="section">
+  <h2>Work Completed So Far</h2>
+  <p>
+    We started off by understanding how the Glucose library works. We identified the relevant sections of the library and implemented a purely sequential MaxSAT solver. It iterates B = 0, 1, 2, ... and for each B, encodes the constraint that <code>sum(relax_vars) &le; B</code> and calls Glucose's solver with this assumption. Learned clauses are reused across iterations, giving the sequential solver a significant advantage over solving from scratch each time.
+  </p>
+  <p>
+    We also experimented with a naive parallel version that splits the search space by partitioning the minimum number of soft clause violations. After calibration, we switched to a <strong>dynamic work queue</strong> approach that assigns the next unclaimed bound B to whichever thread finishes first, avoiding load imbalance from static partitioning. Threads share only the current best cost atomically, allowing early termination when another thread finds a better solution.
+  </p>
+
+  <h3>Progress vs. Proposal</h3>
+  <p>
+    We are on track with respect to our core goals. The first iteration of our algorithm is working, however it is not performing well across multiple cores. We suspect this will slow future progress and may hinder our ability to expand to multiple communication protocols and other extended goals. We still believe we will be able to achieve all core goals as outlined in the half-week breakdown.
+  </p>
+</div>
+
+<div class="section">
+  <h2>Benchmark Results</h2>
+
+  <h3>Sequential Baseline</h3>
+  <table>
+    <thead>
+      <tr><th>Benchmark</th><th>Cost</th><th>Solve Time (s)</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>close_solutions-teams16_l6a</td><td>14</td><td>0.639</td></tr>
+      <tr><td>close_solutions-teams20_l5a</td><td>16</td><td>3.778</td></tr>
+      <tr><td>xai-mindset2-zoo</td><td>20</td><td>0.027</td></tr>
+      <tr><td>c-inference-pre-processing</td><td>0</td><td>0.000</td></tr>
+      <tr><td>causal-discovery</td><td>26</td><td>6.286</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Parallel Version — Solve Time by Thread Count (s)</h3>
+  <table>
+    <thead>
+      <tr><th>Benchmark</th><th>Cost</th><th>1T</th><th>2T</th><th>4T</th><th>8T</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>close_solutions-teams16_l6a</td><td>14</td><td>0.582</td><td>0.360</td><td>1.017</td><td>1.570</td></tr>
+      <tr><td>close_solutions-teams20_l5a</td><td>16</td><td>3.752</td><td>4.089</td><td>6.178</td><td>7.797</td></tr>
+      <tr><td>xai-mindset2-zoo</td><td>20</td><td>0.024</td><td>0.026</td><td>0.023</td><td>0.033</td></tr>
+      <tr><td>c-inference-pre-processing</td><td>0</td><td>0.000</td><td>0.001</td><td>0.001</td><td>0.003</td></tr>
+      <tr><td>causal-discovery</td><td>26</td><td>6.250</td><td>4.823</td><td>3.583</td><td>5.146</td></tr>
+    </tbody>
+  </table>
+
+  <p>We hope to select more appropriate benchmarks that allow for greater parallelism and reevaluate both approaches against those tests.</p>
+</div>
+
+<div class="section">
+  <h2>Goals for Poster Session</h2>
+  <ul>
+    <li>Deliver a working parallel MaxSAT solver that shares learned clauses across cores, targeting at least 2–4x speedup over the sequential baseline on hard benchmark instances.</li>
+    <li>Collect and present performance data across 1, 2, 4, and 8 threads on GHC and possibly PSC, measuring speedup, scalability, and solution quality.</li>
+    <li>If clause sharing alone does not yield meaningful speedup, demonstrate and explain an alternative parallelism strategy (e.g., sacrificing optimality for throughput) with data justifying the tradeoff.</li>
+    <li>Present clear graphs and a visual walkthrough of each approach — sequential baseline, naive parallel, clause-sharing parallel, or any other algorithms — highlighting advantages and disadvantages of each.</li>
+  </ul>
+
+  <h3>Display</h3>
+  <p>We plan to provide graphs showing speedup relative to thread count during the final poster session. Currently, we are timing our code similarly to previous assignments for a select few test cases.</p>
+</div>
+
+<div class="section">
+  <h2>Concerns</h2>
+  <ul>
+    <li>The benchmark test suite is too large in terms of memory. We need to randomly select a subset.</li>
+    <li>There is significant variation in how long each test takes. Some tests produce correct results in 0.001s even with a sequential approach. We need to focus on harder instances where individual SAT calls are expensive and the optimal cost is large enough that multiple B values need to be explored.</li>
+    <li>The parallel version currently shows no speedup on tested instances. The main bottleneck is that each thread builds its own independent solver and counter table from scratch.</li>
+    <li>We are also unsure whether more clause sharing across cores will provide a significantly better parallel algorithm in terms of speedup.</li>
+  </ul>
+</div>
+
+</body>
+</html>
