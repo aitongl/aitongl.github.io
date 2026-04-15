@@ -44,12 +44,23 @@
     <li>&#9989; Implement a baseline parallel MaxSAT solver by running multiple SAT solver instances in parallel on different parts of the search space.</li>
     <li>&#9744; Design a more sophisticated parallel algorithm that shares clauses and other internal information using OpenMP.</li>
     <li>&#9744; Evaluate performance on standard benchmark instances (e.g., SATLIB / MaxSAT benchmarks) using PSC cluster resources.</li>
-    <li>&#9744; Measure speedup vs. sequential baseline and scalability across cores/processors.</li>
+    <li>&#9744; Measure:
+      <ul>
+        <li>Speedup vs. sequential baseline</li>
+        <li>Scalability across cores/processors</li>
+      </ul>
+    </li>
   </ul>
 
   <h3>Extended Goals</h3>
   <ul>
-    <li>&#9744; Compare multiple communication strategies: no communication, periodic clause sharing, adaptive/selective clause sharing.</li>
+    <li>&#9744; Compare multiple communication strategies, such as:
+      <ul>
+        <li>No communication (independent workers)</li>
+        <li>Periodic clause sharing</li>
+        <li>Adaptive or selective clause sharing</li>
+      </ul>
+    </li>
     <li>&#9744; Implement simple load balancing or work-stealing to improve utilization.</li>
     <li>&#9744; Explore heuristics for deciding what information to share (e.g., only high-quality learned clauses).</li>
   </ul>
@@ -60,32 +71,38 @@
 
   <h3>Apr 13–16 <small>(Responsible: Ivy)</small></h3>
   <ul>
-    <li>Understand why the current baseline parallel MaxSAT is performing worse on multiple cores.</li>
-    <li>Select a better set of benchmarks with room for parallelism. Rerun testing for previous approaches.</li>
+    <li>Understand why the current baseline parallel MaxSAT is performing worse on multiple cores. This will give us an understanding of how to implement the sophisticated algorithm.</li>
+    <li>Select a better set of benchmarks to ensure that the test cases have room for parallelism. Rerun some testing for the previous approaches.</li>
   </ul>
 
   <h3>Apr 17–19 <small>(Responsible: Ananya)</small></h3>
   <ul>
-    <li>Use insights from the analysis to implement a sophisticated parallel algorithm with clause and internal information sharing.</li>
-    <li>Brainstorm alternative approaches in case clause sharing does not provide significant speedup. If speedup is hard to achieve, consider sacrificing correctness for better throughput.</li>
+    <li>Use the insights from the above analysis to implement a sophisticated parallel algorithm that takes advantage of sharing clauses and internal information.</li>
+    <li>Brainstorm for alternative approaches to parallelism at the same time in case that clause sharing does not provide a significant advantage/speedup. If it comes up that speedup is hard in the case we want a perfect solution, try sacrificing correctness for better speedup (might not find the most optimal solution).</li>
   </ul>
 
   <h3>Apr 20–23 <small>(Responsible: Ivy)</small></h3>
   <ul>
-    <li>Iterate on the algorithm to maximize performance.</li>
-    <li>Potentially explore extended goals such as heuristics for sharing only high-quality learned clauses.</li>
+    <li>Iterate on the above algorithm to maximise performance.</li>
+    <li>Potentially explore extended goals such as exploring heuristics on what to share and maybe only sharing the high quality learned clauses.</li>
   </ul>
 
   <h3>Apr 24–26 <small>(Responsible: Ivy)</small></h3>
   <ul>
-    <li>Record speedups and data on GHC and PSC machines using a selected subset of standard benchmarks.</li>
-    <li>Measure: speedup vs. sequential baseline, scalability across cores/processors, and accuracy if sacrificed.</li>
+    <li>Record speedups and data on GHC and PSC machines. Use selected subset of standard benchmarks.</li>
+    <li>Measure:
+      <ul>
+        <li>Speedup vs. sequential baseline</li>
+        <li>Scalability across cores/processors</li>
+        <li>Accuracy, if that is sacrificed in the algorithm</li>
+      </ul>
+    </li>
   </ul>
 
   <h3>Apr 27–30</h3>
   <ul>
     <li>Write up the prose of the report. <em>(Responsible: Ananya)</em></li>
-    <li>Generate plots and tables for the report. <em>(Responsible: Ivy)</em></li>
+    <li>Generate plots and tables for report. <em>(Responsible: Ivy)</em></li>
     <li>Clean up code for submission and ease of understanding.</li>
   </ul>
 </div>
@@ -93,20 +110,23 @@
 <div class="section">
   <h2>Work Completed So Far</h2>
   <p>
-    We started off by understanding how the Glucose library works. We identified the relevant sections of the library and implemented a purely sequential MaxSAT solver. It iterates B = 0, 1, 2, ... and for each B, encodes the constraint that <code>sum(relax_vars) &le; B</code> and calls Glucose's solver with this assumption. Learned clauses are reused across iterations, giving the sequential solver a significant advantage over solving from scratch each time.
+    We started off by understanding how the Glucose library works. We first identified the relevant sections of the library for us and then worked on using it to implement a purely sequential MaxSAT solver. It iterates B = 0, 1, 2, ... and for each B, encode the constraint that sum(relax_vars) &le; B and calls Glucose's solver with this assumption. Learned clauses are reused across iterations, giving the sequential solver a significant advantage over solving from scratch each time.
   </p>
   <p>
-    We also experimented with a naive parallel version that splits the search space by partitioning the minimum number of soft clause violations. After calibration, we switched to a <strong>dynamic work queue</strong> approach that assigns the next unclaimed bound B to whichever thread finishes first, avoiding load imbalance from static partitioning. Threads share only the current best cost atomically, allowing early termination when another thread finds a better solution.
+    In addition, we also experimented with a naive parallel version that splits up the search space by partitioning the minimum number of soft clause violations. After some calibrations and testing, we decided to instead use a dynamic work queue approach that assigns the next unclaimed bound B to whichever thread finishes first, avoiding the load imbalance of static partitioning. Threads share only the current best cost atomically, allowing early termination when another thread finds a better solution.
   </p>
 
-  <h3>Progress vs. Proposal</h3>
+  <h3>How We're Doing with Respect to Proposal</h3>
   <p>
-    We are on track with respect to our core goals. The first iteration of our algorithm is working, however it is not performing well across multiple cores. We suspect this will slow future progress and may hinder our ability to expand to multiple communication protocols and other extended goals. We still believe we will be able to achieve all core goals as outlined in the half-week breakdown.
+    We are doing well with respect to the core goals proposed in our project proposal. We have the first iteration of our algorithm working. However, it is not performing well across multiple cores which is a cause for concern for us. Thus we suspect this will slow down our future progress, possibly hindering our ability to expand to multiple communication protocols and other extended goals.
+  </p>
+  <p>
+    We still believe we will be able to achieve all our core goals as outlined in our half week breakdown.
   </p>
 </div>
 
 <div class="section">
-  <h2>Benchmark Results</h2>
+  <h2>Preliminary Results</h2>
 
   <h3>Sequential Baseline</h3>
   <table>
@@ -125,7 +145,7 @@
   <h3>Parallel Version — Solve Time by Thread Count (s)</h3>
   <table>
     <thead>
-      <tr><th>Benchmark</th><th>Cost</th><th>1T</th><th>2T</th><th>4T</th><th>8T</th></tr>
+      <tr><th>Benchmark</th><th>Costs</th><th>1T</th><th>2T</th><th>4T</th><th>8T</th></tr>
     </thead>
     <tbody>
       <tr><td>close_solutions-teams16_l6a</td><td>14</td><td>0.582</td><td>0.360</td><td>1.017</td><td>1.570</td></tr>
@@ -136,29 +156,29 @@
     </tbody>
   </table>
 
-  <p>We hope to select more appropriate benchmarks that allow for greater parallelism and reevaluate both approaches against those tests.</p>
+  <p>These are some of the times that were collected for the current two approaches that we implemented. We hope to come up with more appropriate benchmarks that give away for more parallelism and reevaluate the two approaches with respect to those tests.</p>
 </div>
 
 <div class="section">
   <h2>Goals for Poster Session</h2>
   <ul>
-    <li>Deliver a working parallel MaxSAT solver that shares learned clauses across cores, targeting at least 2–4x speedup over the sequential baseline on hard benchmark instances.</li>
-    <li>Collect and present performance data across 1, 2, 4, and 8 threads on GHC and possibly PSC, measuring speedup, scalability, and solution quality.</li>
+    <li>Deliver a working parallel MaxSAT solver that shares learned clauses across cores, targeting at least 2-4x speedup over the sequential baseline on hard benchmark instances.</li>
+    <li>Collect and present performance data across 1, 2, 4, and 8 threads in GHC and possibly more threads on a set of hard benchmarks, measuring speedup, scalability, and solution quality.</li>
     <li>If clause sharing alone does not yield meaningful speedup, demonstrate and explain an alternative parallelism strategy (e.g., sacrificing optimality for throughput) with data justifying the tradeoff.</li>
     <li>Present clear graphs and a visual walkthrough of each approach — sequential baseline, naive parallel, clause-sharing parallel, or any other algorithms — highlighting advantages and disadvantages of each.</li>
   </ul>
 
   <h3>Display</h3>
-  <p>We plan to provide graphs showing speedup relative to thread count during the final poster session. Currently, we are timing our code similarly to previous assignments for a select few test cases.</p>
+  <p>We hope to provide graphs for speedups with respect to different threads during the final poster session. Currently, we have been timing our code similar to how it has been done in the previous assignments for a select few test cases.</p>
 </div>
 
 <div class="section">
   <h2>Concerns</h2>
   <ul>
     <li>The benchmark test suite is too large in terms of memory. We need to randomly select a subset.</li>
-    <li>There is significant variation in how long each test takes. Some tests produce correct results in 0.001s even with a sequential approach. We need to focus on harder instances where individual SAT calls are expensive and the optimal cost is large enough that multiple B values need to be explored.</li>
-    <li>The parallel version currently shows no speedup on tested instances. The main bottleneck is that each thread builds its own independent solver and counter table from scratch.</li>
-    <li>We are also unsure whether more clause sharing across cores will provide a significantly better parallel algorithm in terms of speedup.</li>
+    <li>We used a subset of benchmark test cases to produce the milestone report, but there is a lot of variation in terms of how long each test takes. We might need to be more careful about what to pick. There are some tests that even with a simple sequential approach outputs the correct results in 0.001s. We need to instead focus on harder instances where individual SAT calls are expensive and the optimal cost is large enough that multiple B values need to be explored.</li>
+    <li>The parallel version currently shows no speedup on the instances we tested. The main bottleneck is that each thread builds its own independent solver and counter table from scratch.</li>
+    <li>We are also unsure if more clause sharing across cores will provide a significantly better parallel algorithm in terms of speedup.</li>
   </ul>
 </div>
 
