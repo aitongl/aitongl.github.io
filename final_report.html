@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Parallel MaxSAT Solvers Report</title>
+<style>
+  body {
+    font-family: Georgia, "Times New Roman", serif;
+    max-width: 900px;
+    margin: 2em auto;
+    padding: 0 1.5em;
+    line-height: 1.6;
+    color: #222;
+  }
+  h1, h2, h3 {
+    font-family: Arial, Helvetica, sans-serif;
+    color: #1a1a1a;
+  }
+  h1 { border-bottom: 2px solid #333; padding-bottom: 0.3em; }
+  h2 { border-bottom: 1px solid #888; padding-bottom: 0.2em; margin-top: 1.5em; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1em 0;
+    font-size: 0.95em;
+  }
+  th, td {
+    border: 1px solid #999;
+    padding: 6px 10px;
+    text-align: left;
+  }
+  th { background: #eaeaea; }
+  caption {
+    caption-side: bottom;
+    font-style: italic;
+    padding-top: 0.5em;
+    text-align: left;
+  }
+  ol li { margin-bottom: 0.5em; }
+  code { font-family: Consolas, monospace; background: #f4f4f4; padding: 1px 4px; border-radius: 3px; }
+  .references li { margin-bottom: 0.7em; }
+</style>
+</head>
+<body>
+
+<h1>Parallel MaxSAT Solvers: Implementation and Evaluation</h1>
+
+<h2>Summary</h2>
+<p>We implemented several exact parallel MaxSAT solvers in C++11 on top of the Glucose 4.2.1 SAT solver and evaluated them on the GHC machines. Starting from an incremental sequential MaxSAT baseline, we explored multiple parallelization strategies including bound-range search, portfolio search, clause sharing, smart clause sharing, cube-based decomposition, and a final cube-plus solver with work stealing. Our deliverables include the full solver implementations, correctness and benchmarking harnesses, and performance analysis across 1, 2, 4, and 8 threads. For the parallelism competition, we plan to demonstrate the behavior of these different parallel MaxSAT strategies side-by-side, highlighting both the cases where parallel search improves solution quality or solved-instance count and the architectural bottlenecks that limit strong scaling.</p>
+
+<h2>Background</h2>
+<p>The Maximum Satisfiability (MaxSAT) problem is an optimization variant of the Boolean Satisfiability problem (SAT), one of the central problems in theoretical computer science. In SAT, the input is a Boolean formula in conjunctive normal form (CNF), meaning it is expressed as a conjunction of clauses, where each clause is a disjunction of literals (a variable or its negation). The goal is to determine whether there exists an assignment to the Boolean variables that makes all clauses evaluate to true.</p>
+
+<p>MaxSAT generalizes SAT by relaxing the requirement that all clauses must be satisfied. Instead, the objective is to find an assignment that satisfies the maximum number of clauses. The goal is to maximize the number of satisfied clauses. A common formulation is Partial MaxSAT, where clauses are divided into hard clauses, which must be satisfied, and soft clauses, which may be violated. The solution must satisfy all hard clauses while minimizing the number of violated soft clauses.</p>
+
+<p>Formally, the input to an unweighted MaxSAT instance consists of a set of Boolean variables and a set of clauses, each clause being a disjunction of literals. In the partial setting, the clauses are partitioned into hard and soft sets. The output is the maximum number of satisfied clauses or, equivalently, the minimum number of violated soft clauses.</p>
+
+<p>MaxSAT is NP-hard, since it generalizes SAT, which is NP-complete. As a result, exact solvers rely on exponential-time search in the worst case, typically implemented as a combination of backtracking, branch-and-bound, and reductions to SAT.</p>
+
+<h3>Key Data Structures</h3>
+<p>Each solver thread maintains its own internal Glucose solver state. This includes the clause database, which stores both the original problem clauses and any learned conflict clauses added during search; watched literals, which are the data structures used to implement efficient Boolean propagation; the assignment trail, which records the sequence of variable assignments and decision levels made during search; learned clauses, which capture conflicts discovered so they are not repeated; and branching heuristics, such as variable activity scores, phase choices, and restart state, which guide the search toward promising parts of the space.</p>
+
+<p>The key operations on these structures are the standard CDCL operations: unit propagation over watched literals, conflict analysis when propagation reaches a contradiction, learning and inserting a new clause into the clause database, backtracking by popping the assignment trail to an earlier decision level, and branching by selecting the next decision variable according to the heuristic state. In the parallel setting, additional coordination operations may update shared bounds, exchange selected learned clauses, or assign new work to idle threads.</p>
+
+<p>We can utilize MaxSAT to solve a wide range of problems. One interesting application we want to highlight is its use in solving a grid-based shortest path finding algorithm. In the problem, we are given a grid with a start (S) and a goal (G) and some blocked squares. We would like to find the shortest path from S to G, avoiding the blocked squares.</p>
+
+<p>We can model the problem as follows: each unblocked grid cell is mapped to a Boolean variable. A variable is true if the path visits that cell, and false otherwise. This turns a geometric problem into a discrete assignment problem over variables.</p>
+
+<p>The constraints are then encoded as clauses. Hard constraints enforce correctness. For example, the start (S) and goal (G) cells must be included in the path, so their corresponding variables must be true. Additional hard constraints would enforce path connectivity and prevent invalid structures like disconnected segments.</p>
+
+<p>Soft constraints encode preferences rather than requirements. In this case, each non-essential cell has a soft clause encouraging it to be false. Intuitively, the solver is biased toward using fewer cells, which corresponds to finding a shorter path. Since all soft clauses have equal weight, minimizing violated soft clauses is equivalent to minimizing the number of cells included in the path.</p>
+
+<p>The MaxSAT solver then finds an assignment that satisfies all hard constraints while minimizing the number of true variables among the soft ones. The result is a valid path from S to G that is as short as possible under the encoding.</p>
+
+<p>This illustrates a broader pattern. Many combinatorial problems can be expressed as selecting a subset of elements subject to constraints, with an objective to minimize or maximize some cost. MaxSAT provides a uniform way to encode both feasibility and optimization in a single framework.</p>
+
+<h3>Workload</h3>
+<p>The computational bottleneck in MaxSAT is the repeated SAT solving inside the optimization loop. Each SAT call involves exploring a large search space via branching, Boolean constraint propagation, conflict analysis, and clause learning. Among these, propagation dominates runtime due to frequent, irregular memory accesses through watch lists and clauses. Since many SAT calls may be required to prove optimality, this cost accumulates significantly.</p>
+
+<p>The workload to the MaxSAT problem can be thought of as a search tree. For every individual variable, we have two possible assignments for it. Therefore, this results in a search space of 2<sup>N</sup> individual instances. A naive parallelization would split this tree across threads, but the tree is typically so imbalanced that this produces poor load balancing, and most branches are redundant because CDCL's clause learning can prune huge regions from a single conflict. Instead, standard MaxSAT solvers reformulate the problem as a sequence of SAT queries of whether there exists an assignment that satisfies all hard clauses with at most B soft-clauses. This approach is inherently sequential as we would have to iterate through values of B incrementally. Throughout our project, we explore different ways to break these dependencies.</p>
+
+<p>The sizes of these MaxSAT problem instances can be very large. They range from tens of KB to hundreds of MB. This will fit within the working set, giving good L1/L2 locality. For most parallel implementations, we share the best cost, which is around 8 bytes. In addition, we tried to implement parallelism through clause sharing, which would involve an arbitrary number of useful clauses in a shared address space.</p>
+
+<p>Available parallelism is therefore coarse-grained and task-based. Threads can explore different parts of the search space or run different strategies, but they are coupled through shared information such as the global best cost and, optionally, learned clauses. These introduce synchronization and communication overhead.</p>
+
+<p>Locality is moderate and mostly confined to thread-local solver state such as clause databases and trails. However, access patterns are irregular, and large instances or aggressive clause sharing can degrade cache performance. The workload is not well suited to SIMD, as it involves branch-heavy control flow and pointer-based data structures rather than regular array computations.</p>
+
+<h2>Approach</h2>
+<p>Our implementation is written in C++11. We use OpenMP for thread-level parallelism in the portfolio-style solvers, and C++ concurrency primitives such as <code>std::atomic</code> and <code>std::mutex</code> for lightweight shared-state coordination in other variants. We targeted the GHC machines and evaluated configurations with 1, 2, 4, and 8 threads, matching the available hardware parallelism.</p>
+
+<h3>Starter Code</h3>
+<p>Our implementation builds on the Glucose 4.2.1 SAT solver, which provides the underlying sequential CDCL engine. We use its core solver functionality, literal and clause representations, incremental solving interface, and WCNF parsing support as the foundation for all of our variants. On top of this SAT infrastructure, we implemented the MaxSAT reformulation, incremental bound handling, and the parallel coordination mechanisms used in our bound-based, portfolio, clause-sharing, smart-sharing, and cube-based solvers.</p>
+
+<p>We therefore did not implement a SAT solver from scratch. The existing code we started from was the open-source Glucose 4.2.1 codebase; our contribution was to build exact MaxSAT algorithms and parallel search strategies above it, including the cardinality encoding, shared-bound management, clause-exchange policies, cube generation and scheduling, and the experimental benchmarking and evaluation infrastructure.</p>
+
+<h3>Iteration History</h3>
+<p>Our sequential solver is an exact incremental MaxSAT implementation written in C++ on top of the Glucose SAT solver, using WCNF input on the GHC machines. Hard clauses are added directly to the SAT instance, while each soft clause is augmented with a relaxation variable, so setting that variable to true corresponds to paying the cost of violating the clause.</p>
+
+<p>The solver searches over the allowed number of violated soft clauses, B. For each candidate bound, it enforces that at most B relaxation variables may be true and asks Glucose whether the resulting formula is satisfiable. If the formula is unsatisfiable, the solver increases B; if it is satisfiable, that bound is optimal and the returned model gives the MaxSAT cost. To avoid rebuilding the SAT instance at every step, we keep one Glucose solver alive across the entire search and extend the cardinality encoding lazily as B increases. This lets Glucose reuse learned clauses, watched literals, and heuristic state across iterations, substantially reducing repeated work compared with solving each bound from scratch.</p>
+
+<h3>Naive Bound Search</h3>
+<p>After getting a basic MaxSAT solver finding the correct results, we started iterations to parallelize our approach. The most natural parallelization of the sequential solver is to parallelize across the bound B. In the sequential algorithm, we test bounds B = 0, 1, 2,… until we find the smallest satisfiable value, where each bound B is expressed as a Sinz encoding, a set of CNF clauses that expresses the cardinality constraint "at most B variables are true," handed to the SAT solver. So a straightforward idea is to let multiple threads evaluate different candidate bounds concurrently. We implemented this as a bound-range parallel solver, where threads repeatedly claim the next unassigned bound using an atomic counter and solve that subproblem independently. This preserves the overall structure of the sequential algorithm and exposes obvious task-level parallelism.</p>
+
+<p>However, this approach did not produce a strong speedup. The main reason is that the sequential solver's effectiveness comes from incrementality: one persistent Glucose instance accumulates learned clauses, watched-literal state, and heuristic information as the bound increases. In the bound-parallel version, each thread must maintain its own solver instance, so this incremental state is duplicated rather than shared. As a result, threads repeatedly rebuild similar encodings, re-derive similar conflicts, and prove nearby bounds unsatisfiable independently. Once the smallest satisfiable bound is found, all work on larger speculative bounds becomes wasted. Thus, although bound parallelism is the most direct parallel extension of the sequential solver, it sacrifices the very reuse that makes the sequential implementation efficient, which explains why its speedup remained limited. Specifically, the most noteworthy parts of the bound-range algorithm profiling are shown in the table below, demonstrating places of inefficiency when the number of threads increases.</p>
+
+<table>
+  <caption>Table 1: Profiler results for the Naive Bound Search</caption>
+  <thead>
+    <tr><th>Metric</th><th>1 Thread</th><th>2 Threads</th><th>4 Threads</th><th>8 Threads</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Speedup</td><td>1.00×</td><td>0.97×</td><td>1.36×</td><td>0.86×</td></tr>
+    <tr><td>CPUs utilized</td><td>0.998</td><td>1.840</td><td>3.304</td><td>6.825</td></tr>
+    <tr><td>IPC</td><td>1.88</td><td>1.45</td><td>1.08</td><td>0.54</td></tr>
+    <tr><td>Cycles (B)</td><td>3.68</td><td>7.04</td><td>9.44</td><td>27.26</td></tr>
+    <tr><td>Instructions (B)</td><td>6.94</td><td>10.23</td><td>10.23</td><td>14.74</td></tr>
+    <tr><td>Context switches</td><td>4</td><td>11</td><td>41</td><td>69</td></tr>
+    <tr><td>LLC loads (M)</td><td>54.9</td><td>93.8</td><td>76.4</td><td>113.6</td></tr>
+    <tr><td>LLC miss rate</td><td>1.95%</td><td>9.14%</td><td>23.39%</td><td>47.30%</td></tr>
+  </tbody>
+</table>
+
+<p>As can be seen in Table 1, although the CPU utilization scales up with the number of threads, we see that the Instructions Per Cycle (IPC) is decreasing. This suggests that the threads are spending more time waiting for memory loads and other synchronization calls. This matches up with the higher LLC miss rate due to cache contention. This causes sub-unity speedup as the number of threads increases. In addition, the total number of instructions also increased because the original iterative algorithm would stop immediately after finding a B value because it is the most optimal one, but with multiple threads, a lot of processors are doing unnecessary work, both overshooting past the optimal B and redundantly rebuilding Sinz encodings and re-deriving similar conflicts that the sequential solver would have reused incrementally. Through various testing, we also discovered there were very inconsistent speedups with the number of threads. This was usually due to how the bounds were split up, and a certain number of threads made the search converge faster due to luck.</p>
+
+<h3>Portfolio Solver</h3>
+<p>Since parallelizing over bounds introduced both duplicated prefix work and sensitivity to how bounds were assigned, the weak and inconsistent speedups of bound-range parallelism suggested that dividing work purely by candidate bound was the wrong granularity. We therefore next explored portfolio search as a way to obtain parallel benefit through heuristic diversity instead. Each thread ran the full incremental MaxSAT search from B=0 upward, but with a different Glucose heuristic profile. In practice, this meant varying parameters such as the random seed, random variable frequency, and variable decay so that different threads would follow different CDCL search trajectories even though they were solving the same sequence of bounded subproblems. This design required very little coordination, since threads only needed to share the best solution found so far, and it preserved exactness without introducing clause-sharing machinery.</p>
+
+<p>However, the portfolio solver also failed to produce strong scaling. The advantage of this approach is that no thread is permanently assigned a stale bound range; instead, all threads compete to find the optimal bound first. The disadvantage is that each thread still duplicates nearly the entire incremental search process, including rebuilding the same counter columns, proving the same early bounds unsatisfiable, and maintaining a full private copy of the solver's clause database, watched-literal structures, and heuristic state. As a result, speedup became largely probabilistic: performance improved only when one heuristic configuration happened to reach a favourable search path much earlier than the others.</p>
+
+<table>
+  <caption>Table 2: Profiler results for Portfolio Solver</caption>
+  <thead>
+    <tr><th>Metric</th><th>t=1</th><th>t=2</th><th>t=4</th><th>t=8</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Cycles (B)</td><td>70.14</td><td>138.53</td><td>271.82</td><td>472.41</td></tr>
+    <tr><td>Instructions (B)</td><td>58.84</td><td>111.95</td><td>193.96</td><td>259.29</td></tr>
+    <tr><td>IPC</td><td>0.84</td><td>0.81</td><td>0.71</td><td>0.55</td></tr>
+    <tr><td>Cache References (B)</td><td>6.68</td><td>12.43</td><td>20.99</td><td>24.13</td></tr>
+    <tr><td>Cache Misses (B)</td><td>0.08</td><td>0.74</td><td>3.68</td><td>7.58</td></tr>
+    <tr><td>Cache Miss %</td><td>1.25%</td><td>5.96%</td><td>17.53%</td><td>31.40%</td></tr>
+    <tr><td>LLC Load Misses (M)</td><td>4.12</td><td>50.24</td><td>309.81</td><td>893.66</td></tr>
+    <tr><td>Branch Misses (B)</td><td>0.94</td><td>1.77</td><td>3.06</td><td>4.02</td></tr>
+    <tr><td>Time Elapsed (s)</td><td>15.002</td><td>15.004</td><td>15.006</td><td>15.013</td></tr>
+    <tr><td>User Time (s)</td><td>14.979</td><td>29.944</td><td>59.892</td><td>119.469</td></tr>
+    <tr><td>Sys Time (s)</td><td>0.022</td><td>0.053</td><td>0.093</td><td>0.372</td></tr>
+  </tbody>
+</table>
+
+<p>The profiler data in Table 2 reinforces this interpretation. Although elapsed time stays fixed at roughly 15 seconds across all thread counts, total work grows substantially as more threads are added: cycles increase from 70.14B at 1 thread to 472.41B at 8 threads, and instructions rise from 58.84B to 259.29B. At the same time, IPC falls from 0.84 to 0.55, while cache miss rate increases sharply from 1.25% to 31.40% and LLC load misses grow by over two orders of magnitude. This indicates that the portfolio solver is not limited by a lack of available threads, but by the cost of running many independent CDCL searches with replicated solver state. Each thread maintains its own clause database, watched literals, trail, and heuristics, so the aggregate working set grows with thread count and quickly overwhelms the cache hierarchy. As a result, the portfolio design becomes increasingly memory-bound: more threads execute more total work, but much of that work is redundant and far less efficient per core, which explains the weak and often negative scaling.</p>
+
+<h3>Clause Sharing</h3>
+<p>To address the limitations of both bound-range parallelism and portfolio search, we next explored clause sharing. Bound-range parallelism suffered from duplicated work on speculative bounds that later became irrelevant once the optimal bound was found, while portfolio search reduced explicit bound partitioning but still duplicated much of the same incremental CDCL search across threads. Clause sharing offered a natural compromise: while each thread explores their assignments and search space, high-quality learned clauses over the original formula variables are universally valid and can be broadcast to all threads.</p>
+
+<p>We implemented a shared clause pool protected by a mutex, where after each solve call a thread exports learned clauses that pass a quality filter and reference only original or relaxation variables. Before each solve call, threads import any new clauses added to the pool since their last import. To minimize lock contention, clause data is copied outside the lock and an atomic counter provides a fast-path check so threads skip lock acquisition entirely when there is nothing new.</p>
+
+<table>
+  <caption>Table 3: Profiler results for clause sharing.</caption>
+  <thead>
+    <tr><th>Metric</th><th>1 Thread</th><th>2 Threads</th><th>4 Threads</th><th>8 Threads</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Solve time (s)</td><td>0.656</td><td>0.661</td><td>0.446</td><td>0.860</td></tr>
+    <tr><td>Time elapsed (s)</td><td>0.776</td><td>0.790</td><td>0.582</td><td>1.015</td></tr>
+    <tr><td>Cycles</td><td>3,623,662,041</td><td>6,658,255,921</td><td>8,753,446,339</td><td>28,945,055,110</td></tr>
+    <tr><td>Instructions</td><td>6,834,181,732</td><td>9,745,445,034</td><td>9,560,690,246</td><td>15,801,371,636</td></tr>
+    <tr><td>IPC</td><td>1.89</td><td>1.46</td><td>1.09</td><td>0.55</td></tr>
+    <tr><td>Cache references</td><td>497,055,826</td><td>751,281,447</td><td>576,156,583</td><td>750,730,661</td></tr>
+    <tr><td>Cache misses</td><td>21,140,397</td><td>111,745,010</td><td>181,592,790</td><td>371,047,902</td></tr>
+    <tr><td>Cache miss rate</td><td>4.25%</td><td>14.87%</td><td>31.52%</td><td>49.42%</td></tr>
+    <tr><td>L1 cache load misses</td><td>234,009,504</td><td>354,996,451</td><td>301,360,381</td><td>504,119,400</td></tr>
+    <tr><td>LLC load misses</td><td>1,098,643</td><td>8,185,506</td><td>17,194,719</td><td>57,820,072</td></tr>
+    <tr><td>Branch misses</td><td>17,532,883</td><td>26,108,822</td><td>23,504,865</td><td>39,358,651</td></tr>
+    <tr><td>Context switches</td><td>2</td><td>7</td><td>9</td><td>112</td></tr>
+    <tr><td>User time (s)</td><td>0.760</td><td>1.405</td><td>1.879</td><td>6.674</td></tr>
+    <tr><td>System time (s)</td><td>0.016</td><td>0.031</td><td>0.047</td><td>0.117</td></tr>
+  </tbody>
+</table>
+
+<p>Table 3 shows that the same memory-bound application exists. LLC miss rate still climbs steeply from 4.38% at one thread to 50.78% at eight threads, and IPC degrades from 1.82 to 0.55 over the same range. Because each thread's solver maintains its own full copy of the clause database, watched-literal structures, and variable state, the aggregate working set grows with thread count and far exceeds the shared LLC at eight threads, causing cache contention that overwhelms the benefit of reduced redundant work. Since storing too much information was overwhelming the cache and hurting performance rather than strengthening it, we decided to alter our definition of high quality learned-clauses.</p>
+
+<h3>Clause Smart Sharing (More Tuning)</h3>
+<p>In the following iteration, we experimented with various ways of tuning a high-quality clause. Previously, we had a loose definition that as long as the learned clause doesn't make a lot of assumptions, we will add it to shared clauses. In an attempt to make our program less memory bound, we experimented with various metrics to decide if a clause is worth sharing. The metrics that we decided to include were Literal Block Distance (LBD) threshold, size limit, rate limiting, and activity-aware filtering. The LBD threshold filters for clauses with few decision levels, which are more generalizable and rely on fewer assumptions. The size limit avoids storing learned clauses with a lot of literals, which are rarely useful because they would require all of those specific literals to hold simultaneously. Rate limiting simply restricts how quickly an instance adds to the pool of shared clauses, forcing each instance to select only a few of the highest-quality learned clauses. Last, we included activity-aware filtering, a metric specific to Glucose in which each learned clause's score increases every time it is used to derive another learned clause; again, this score indicates how generalizable and applicable the clause is. After careful experimentation with these metrics, we found the following combination to give the best results. LBD threshold was tightened from less than 5 to less than 3. We limited the size of the learned clause to be less than 3 variables, and we also determined that a thread cannot import more than 10 clauses per second. Together, these restrictions were able to keep the size of the shared clause pool much smaller. Previously, on a high number of threads, we were having more than two thousand shared clauses but now we only have 4 high-quality shared clauses.</p>
+
+<table>
+  <caption>Table 4: Profiler results for Clause Smart Sharing</caption>
+  <thead>
+    <tr><th>Metric</th><th>1 Thread</th><th>2 Threads</th><th>4 Threads</th><th>8 Threads</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Solve time (s)</td><td>0.682</td><td>0.657</td><td>0.506</td><td>0.735</td></tr>
+    <tr><td>Speedup (wall)</td><td>1.00×</td><td>1.02×</td><td>1.25×</td><td>0.91×</td></tr>
+    <tr><td>Cycles (B)</td><td>3.76</td><td>6.62</td><td>9.59</td><td>26.01</td></tr>
+    <tr><td>Instructions (B)</td><td>6.84</td><td>9.75</td><td>10.20</td><td>14.37</td></tr>
+    <tr><td>IPC</td><td>1.82</td><td>1.47</td><td>1.06</td><td>0.55</td></tr>
+    <tr><td>Cache misses (M)</td><td>21.91</td><td>100.02</td><td>200.83</td><td>335.9</td></tr>
+    <tr><td>Cache miss rate</td><td>4.38%</td><td>14.58%</td><td>31.38%</td><td>50.78%</td></tr>
+    <tr><td>L1 d-cache misses (M)</td><td>234.1</td><td>355.1</td><td>336.1</td><td>443.8</td></tr>
+    <tr><td>LLC load misses (M)</td><td>1.15</td><td>8.02</td><td>19.08</td><td>51.60</td></tr>
+    <tr><td>Branch misses (M)</td><td>17.5</td><td>26.1</td><td>26.9</td><td>33.6</td></tr>
+    <tr><td>Clauses shared</td><td>816</td><td>1,183</td><td>2,020</td><td>3,173</td></tr>
+  </tbody>
+</table>
+
+<p>Table 4 shows that, although the number of shared learned clauses decreased dramatically under the smart-sharing filters, the profiling data from the basic sharing run reveal why cache pressure remained the dominant bottleneck, regardless of sharing quality. The issue is the solver state itself. Each thread maintains its own full copy of the clause database, watched-literal structures, and variable activity arrays. This aggregate working set exists due to our attempted form of parallelism, where each thread has its Glucose SAT instance. This confirms that the memory bottleneck in this parallel design is structural rather than tunable. Therefore, from here, we wanted to do a full pivot with our approach in order to achieve high parallelism.</p>
+
+<h3>Cube Basic</h3>
+<p>Rather than coordinating threads that redundantly search the same space, a structural flaw that clause sharing alone could not fix, we pivoted to cubing, a technique that partitions the search space by fixing the values of K variables that appear most frequently across clauses. This produces 2<sup>K</sup> cubes, each a complete assignment over those K variables, defining disjoint subtrees of the original search space. Because no two cubes share a variable assignment, threads can work on separate cubes in parallel with zero redundant work, eliminating the cache contention and duplicate derivation that plagued every previous iteration by construction rather than by tuning.</p>
+
+<p>However, each cube still leaves a residual subproblem over the remaining (N−K) variables, which is itself an exponentially large search tree. Exhaustively solving every cube to proven optimality is impractical within a fixed time budget, since a single cube can require arbitrarily long CDCL search depending on how the remaining variables interact with the clauses. We therefore bound each cube's exploration with a global wall-clock limit, allowing the parallel search to make broad progress across many cubes rather than getting stuck on a small number of hard ones, at the cost of some cubes returning unknown rather than a proven result.</p>
+
+<table>
+  <caption>Table 5: Profiler results for cube basic for k=10</caption>
+  <thead>
+    <tr><th>Metric</th><th>1 Thread</th><th>2 Threads</th><th>4 Threads</th><th>8 Threads</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Solve Time (s)</td><td>9.717</td><td>11.716</td><td>12.130</td><td>12.238</td></tr>
+    <tr><td>Final Cost</td><td>34</td><td>26</td><td>25</td><td>23</td></tr>
+    <tr><td>Cycles (B)</td><td>48.2</td><td>105.1</td><td>216.9</td><td>372.3</td></tr>
+    <tr><td>Instructions (B)</td><td>42.3</td><td>87.3</td><td>157.7</td><td>212.3</td></tr>
+    <tr><td>IPC</td><td>0.88</td><td>0.83</td><td>0.73</td><td>0.57</td></tr>
+    <tr><td>Cache Miss Rate</td><td>0.75%</td><td>4.34%</td><td>15.38%</td><td>26.41%</td></tr>
+    <tr><td>LLC Load Misses (M)</td><td>1.8</td><td>28.0</td><td>221.9</td><td>615.0</td></tr>
+    <tr><td>L1-dcache Misses (B)</td><td>2.16</td><td>4.54</td><td>8.20</td><td>10.78</td></tr>
+    <tr><td>Branch Misses (M)</td><td>692.7</td><td>1444.5</td><td>2611.8</td><td>3456.4</td></tr>
+    <tr><td>sat_events</td><td>0</td><td>8</td><td>9</td><td>11</td></tr>
+    <tr><td>unknown cubes</td><td>5</td><td>10</td><td>19</td><td>27</td></tr>
+  </tbody>
+</table>
+
+<p>Table 5 and running tests show that more threads find better solutions (cost 34 vs 23), but all four runs hit the 10-second wall clock limit, so the improvement comes simply from more threads covering more cubes in parallel and landing on ones containing better solutions sooner. At t=1, the single thread proved 512 cubes UNSAT and ran out of time before ever finding a SAT result (sat_events=0), so it returned the seed cost unchanged.</p>
+
+<p>The profiler also reveals inefficiency in the hardware counters. IPC falls from 0.88 to 0.57, and the cache miss rate jumps from 0.75% to 26.41% as threads scale, with LLC misses growing 344x. Each thread carries its own full Glucose instance, so, again, the total memory footprint scales with thread count and eventually blows past the shared LLC. At t=8, threads are spending more time waiting on memory than doing actual search. This is the same structural problem that killed the clause-sharing approach: independent solver state per thread is the bottleneck, and partitioning the search space doesn't fix it. Since cubing solved the redundancy problem but not the load-balance or per-thread memory-footprint problem, our next step was to refine it into a more adaptive cube-based solver.</p>
+
+<h3>Cube with Stealing</h3>
+<p>Each thread is statically assigned a slice of the 2<sup>K</sup> cubes, but cube solve times vary dramatically; some cubes are trivially UNSAT within milliseconds, while others require long CDCL searches. In order to address any inconsistency in the size of each problem, we decided to add a dynamic work queue to complement the cubing. This means some threads finish their slice early and sit idle while others are still grinding through hard cubes, leaving CPU resources on the table.</p>
+
+<p>Work stealing addresses this by giving each thread a dynamic queue. Initially, each thread owns an equal slice of cube indices. When a thread exhausts its own slice, rather than terminating, it scans the other threads' queues and steals the next cube from whichever thread has the most remaining work. This keeps all threads busy for as long as there are unprocessed cubes, smoothing out the imbalance caused by variable cube difficulty without any central coordination.</p>
+
+<table>
+  <caption>Table 6: Profiler results for cube with stealing</caption>
+  <thead>
+    <tr><th>Metric</th><th>1 Thread</th><th>2 Threads</th><th>4 Threads</th><th>8 Threads</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Seed Time (s)</td><td>0.595</td><td>0.592</td><td>0.590</td><td>0.587</td></tr>
+    <tr><td>Solve Time (s)</td><td>10.049</td><td>10.312</td><td>3.612</td><td>5.087</td></tr>
+    <tr><td>Total Time (s)</td><td>10.644</td><td>10.904</td><td>4.202</td><td>5.674</td></tr>
+    <tr><td>Final Cost</td><td>34</td><td>26</td><td>22</td><td>20</td></tr>
+    <tr><td>Task Clock (ms)</td><td>10650.12</td><td>20387.23</td><td>13298.45</td><td>38451.78</td></tr>
+    <tr><td>CPU Utilization</td><td>1.000</td><td>1.870</td><td>3.166</td><td>6.777</td></tr>
+    <tr><td>Context Switches</td><td>68</td><td>94</td><td>58</td><td>412</td></tr>
+    <tr><td>Page Faults</td><td>18112</td><td>29456</td><td>29891</td><td>65234</td></tr>
+    <tr><td>Cycles (B)</td><td>49.85</td><td>95.12</td><td>60.45</td><td>164.23</td></tr>
+    <tr><td>Instructions (B)</td><td>42.27</td><td>78.18</td><td>52.51</td><td>108.34</td></tr>
+    <tr><td>IPC (insn/cycle)</td><td>0.85</td><td>0.82</td><td>0.87</td><td>0.66</td></tr>
+    <tr><td>Cache Miss Rate</td><td>0.78%</td><td>5.12%</td><td>8.24%</td><td>22.37%</td></tr>
+    <tr><td>LLC Load Misses (M)</td><td>1.9</td><td>32.4</td><td>78.6</td><td>487.3</td></tr>
+    <tr><td>L1-dcache Misses (B)</td><td>2.18</td><td>4.38</td><td>3.92</td><td>8.94</td></tr>
+    <tr><td>Branches (B)</td><td>7.20</td><td>13.33</td><td>8.95</td><td>18.47</td></tr>
+    <tr><td>Branch Miss Rate</td><td>9.57%</td><td>9.61%</td><td>9.30%</td><td>9.33%</td></tr>
+    <tr><td>Elapsed Time (s)</td><td>10.652</td><td>10.910</td><td>4.213</td><td>5.685</td></tr>
+    <tr><td>User Time (s)</td><td>10.615</td><td>20.354</td><td>13.256</td><td>37.784</td></tr>
+    <tr><td>Sys Time (s)</td><td>0.039</td><td>0.037</td><td>0.048</td><td>0.163</td></tr>
+    <tr><td>sat_events</td><td>0</td><td>8</td><td>14</td><td>17</td></tr>
+    <tr><td>unknown cubes</td><td>5</td><td>10</td><td>8</td><td>19</td></tr>
+  </tbody>
+</table>
+
+<p>As seen in Table 6, work stealing delivers a genuine speedup for the first time in our parallelization journey. At t=4, solve time drops from 10.0s to 3.6s, a 2.8x speedup, and the solver finishes before hitting the wall-clock limit, something no prior approach achieved. Final cost also improves monotonically with thread count, meaning extra threads find better solutions rather than just covering the same ground. The t=4 run is especially clean: IPC holds at 0.87, cache miss rate stays at 8.24%, and CPU utilization hits 3.17 out of 4 cores, nearly all available compute is being converted into useful search.</p>
+
+<p>At t=8, however, performance regresses. Solve time climbs back to 5.1s, IPC collapses to 0.66, and cache miss rate nearly triples, while LLC misses grow 6x. Each thread maintains its own independent Glucose solver with its own clause database and watched literals, so the aggregate working set at t=8 no longer fits in the shared LLC and threads begin evicting each other's cache lines. The extra cycles are overwhelmingly memory stalls rather than useful CDCL work. Work stealing fixes the idle-thread problem from cube-basic, but it exposes the memory-bound ceiling of independent per-thread solver state, motivating the next iteration of sharing learned clauses across threads.</p>
+
+<h3>Mapping the Problem to the Parallel Machine</h3>
+<p>In all of our parallel implementations, the fundamental unit of parallelism is a single Glucose SAT solver instance mapped one-to-one onto an OpenMP thread. This mapping choice was driven by a practical constraint: Glucose's internal state, the clause database, watched-literal lists, and many other pieces of machinery. The large machinery itself is not designed to work well with a parallel structure. Sharing a single Glucose instance across threads would require fine-grained locking around nearly every internal operation, which would serialise the search and defeat the purpose of parallelization. Giving each thread its own instance sidesteps this entirely at the cost of replicating the solver state.</p>
+
+<p>Across our iterations, what changed was not this per-thread-instance mapping but rather what work each thread's instance was doing. In the bound-range, portfolio and clause-sharing approaches, all threads were solving subproblems over the same formula with the same variable set, differing only in which bound B they were currently testing. In the Cubing approach, the mapping of instances to threads stays the same. However, each thread is responsible for a distinct cube. The per-thread memory footprint per instance is similar, but because threads are exploring genuinely non-overlapping subtrees of the implication graph, their access patterns to learned clauses and variable activities diverge rather than converge.</p>
+
+<h2>Results</h2>
+
+<h3>Setup</h3>
+<p>The experiments use unweighted MaxSAT instances in WCNF format and range from small to large problems. These examples were taken from the MaxSAT Evaluation 2024 dataset, which is an industry standard. We chose a relevant subset for our case. For example, <code>synthetic_medium.wcnf</code> has 80 soft clauses and 10,520 hard clauses with an optimal cost of 20, while larger instances like <code>wolfram72_0.wcnf.gz</code> have around 18,000 soft clauses and 64,000 hard clauses. We also chose a smaller subset of relatively smaller tests that we used to verify correctness of our solvers.</p>
+
+<h3>Measurement</h3>
+<p>We measured performance in two complementary ways: under a time constraint and under a problem constraint. The problem-constrained measurement fixes the instance and records the wall-clock time each configuration needs to solve it. The time-constrained measurement fixes a wall-clock budget and records the best MaxSAT cost each configuration can find within it, which captures what matters to an end user when the solver cannot prove optimality in a practical timeframe. The first metric is wall-clock solve time for runs that terminate before the budget, from which we compute speedup relative to the single-threaded baseline (solve time at t=1 divided by solve time at t), holding input, cube variable selection, and random seeds constant across thread counts. We use solve time rather than total time because the seed and initialization phases are inherently sequential and would artificially decrease speedup. The second metric is MaxSAT solution quality, the final cost found within a fixed wall-clock time budget. Lower is better, and this matters because for hard instances the solver never finishes within a practical budget, so speedup becomes undefined and solution quality at the deadline is the only meaningful signal.</p>
+
+<h3>Choice of Target Machine</h3>
+<p>Our choice of target machine was sound. A multicore CPU was the right target for this project because our solver is built on top of Glucose, a highly optimized sequential CDCL SAT solver whose core operations rely on complex pointer-heavy data structures, irregular memory accesses, and frequent branching. These characteristics map naturally to shared-memory CPU parallelism but poorly to GPUs, where SIMD-style execution and regular memory access are much more important for efficiency. Since our main source of parallelism came from running multiple solver instances or subproblems concurrently rather than from data-parallel kernels, a CPU target was a much better fit than a GPU.</p>
+
+<h3>Problem Size</h3>
+<p>The problem size is important for our project because different MaxSAT workloads stress very different parts of the solver. Instance size is not captured by a single number: the number of variables controls the depth of the search space, the number of hard clauses determines the size of each thread's clause database, and the number of soft clauses determines the size of the cardinality encoding maintained by each worker. As these dimensions grow, the bottleneck shifts from coordination overhead on small instances, to useful parallel SAT work on medium instances, to cache and memory pressure on large instances.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">Instance</th>
+      <th>t=1</th>
+      <th colspan="2">t=2</th>
+      <th colspan="2">t=4</th>
+      <th colspan="2">t=8</th>
+    </tr>
+    <tr>
+      <th>Solve Time</th>
+      <th>Solve Time</th><th>Speedup</th>
+      <th>Solve Time</th><th>Speedup</th>
+      <th>Solve Time</th><th>Speedup</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>synthetic_small</td><td>1.803 s</td><td>1.178 s</td><td>1.53×</td><td>0.969 s</td><td>1.86×</td><td>0.919 s</td><td>1.96×</td></tr>
+    <tr><td>synthetic_medium</td><td>31.018 s</td><td>21.300 s</td><td>1.46×</td><td>11.582 s</td><td>2.68×</td><td>6.866 s</td><td>4.52×</td></tr>
+    <tr><td>synthetic_large</td><td>120.642 s</td><td>56.036 s</td><td>2.15×</td><td>5.901 s</td><td>20.44×</td><td>6.356 s</td><td>18.98×</td></tr>
+  </tbody>
+</table>
+
+<p>Our results reveal three distinct parallelism regimes. On synthetic_small, speedup plateaus at 1.96× with 8 threads because the 1.8s baseline leaves insufficient work to amortize thread initialisation and Solver setup across 32 cubes. On synthetic_medium, scaling is near-linear at 4.52× with 8 threads, the expected behavior when each cube carries enough SAT work to dominate coordination overhead. The most striking result is synthetic_large, where t=4 achieves a 20× superlinear speedup over t=1. We believe this is a result of the shared global upper bound on the specific test input. With a low number of threads, the run encountered low-cost solutions later on in their search, causing them to search through more assigned variables. At t=4, diverse random seeds across threads cause one thread to quickly find cost=1. As this tightens the global minimum, all remaining cubes now only need to prove they cannot beat 18, which is a much more constrained problem that resolves in milliseconds rather than hitting the conflict budget. The result is that parallelism here improves not just runtime but solution quality: t=1 and t=2 fail to find the optimum within the 120s budget, while t=4 and t=8 find cost=18 in under 6 seconds. This demonstrates that parallel cube-and-conquer benefits go beyond simple work division; diverse simultaneous search produces tighter upper bounds earlier, which exponentially reduces the work required to resolve remaining cubes.</p>
+
+<p>These different regimes mean no single implementation is strictly best; each of our iterations is tuned for a different workload profile. The bound-parallel approach works well on instances where the optimal cost is small, and each bound check is cheap, since the sequential bound-tightening loop is the main bottleneck there. Cube-basic shines on instances with uniformly difficult subproblems, where static partitioning happens to balance well, and the simpler implementation avoids work-stealing overhead. Cube with work stealing is the clear winner when cube difficulty varies widely, which is typical of structured real-world instances, since it keeps all threads busy regardless of how the difficult work happens to distribute across cube indices. Clause sharing becomes proportionally more valuable on large instances where re-deriving a lemma is expensive, and the clause database is already too big to fit in cache, so the extra synchronisation cost is amortised over much larger savings in search effort. Our evaluation focused on the medium regime where these tensions are most visible, but a production solver would likely switch strategies based on instance characteristics rather than committing to one approach.</p>
+
+<h3>Speedup Graphs</h3>
+<p><em>Figure 1: Speedup plots on different-sized test cases</em></p>
+
+<p>Our baseline is the cube-with-sharing solver running on a single thread. As seen in Figure 1, the speedup varies significantly with the size of the test instance (i.e., the number of hard and soft clauses). On the smallest test case, speedup is capped at around 2x, indicating that the problem is too small to benefit from parallel search, coordination overhead and serial work dominates. Both larger instances scale better, and the largest case exhibits superlinear speedup, which is a known phenomenon in portfolio and cube-and-conquer solvers where search-space diversity and clause sharing allow one worker to find a solution dramatically faster than the sequential search would. We also observe a slight regression at higher thread counts in some configurations, consistent with our earlier analysis that seeding plays a large role in how much total work the algorithm performs: once a "lucky" thread has found a productive path, adding more workers contributes coordination overhead without proportional gains.</p>
+
+<h3>Speedup Limitations</h3>
+<p>The cube-plus speedup is limited primarily by serial work in the seed phase and by memory-bandwidth pressure from replicated per-thread solver state. Seed time is constant at 0.59s across all thread counts, and on the large instance, it is the single largest component of wall-clock time at every thread count. In addition, <code>perf stat -d</code> shows clear memory-bound degradation as threads scale: LLC-load-miss rate jumps from 5.12% at t=2 to 22.37% at t=8 as shown in Table 6, L1-cache misses grow roughly linearly with thread count, and IPC falls from 0.82 to 0.66. This is due to having eight independent Glucose instances whose aggregate working set no longer fits in the shared LLC.</p>
+
+<p>A smaller limiter is the cube-difficulty imbalance. Through tracking the steal count throughout the execution of our algorithm, we see that there is always work being stolen. Although this is an overall win for balanced workloads, stealing itself incurs additional overhead.</p>
+
+<h3>Deeper Analysis</h3>
+<p>We break execution time into five components: seed generation, cube construction and initialization, per-thread solver setup, parallel cube solving, and synchronization/work-stealing overhead.</p>
+
+<ol>
+  <li><strong>Seed generation:</strong> Compute an initial feasible assignment and its cost before any cube-based parallel search begins.</li>
+  <li><strong>Cube construction and initialization:</strong> Select cube variables, generate the cube set, and initialize the shared work queues and bookkeeping state.</li>
+  <li><strong>Per-thread solver setup:</strong> Build each thread's private Glucose solver instance, including clauses, relaxation variables, and local counter state.</li>
+  <li><strong>Parallel cube solving:</strong> Repeatedly solve claimed cubes under bounded CDCL search to improve the incumbent or prove cubes infeasible.</li>
+  <li><strong>Synchronisation/work stealing:</strong> Coordinate shared bounds and redistribute remaining cubes from busy threads to idle ones.</li>
+</ol>
+
+<p>To keep the measurements meaningful, we report wall-clock time for the top-level phases and aggregate worker-time inside the parallel region. This distinction is necessary because SAT search, setup, and synchronization are summed across all threads and therefore measure total parallel effort rather than elapsed time.</p>
+
+<p><em>Figure 2: Breakdowns of wall clock time and aggregate worker time percentages across test cases and thread counts.</em></p>
+
+<p>As shown in Figure 2, the seed phase is the main serial bottleneck. On the large instance, it dominates wall-clock runtime at every thread count, and on the small and medium instances it still consumes a substantial fraction of total runtime. Because this phase is fully sequential, it directly limits end-to-end speedup by Amdahl's Law: even perfect scaling in the cube-solving phase cannot overcome a large fixed serial cost. In contrast, initialization remains negligible across all cases, so it is not an important contributor to total runtime.</p>
+
+<p>The worker-time breakdown in Figure 1 shows that almost all parallel effort is spent in SAT search, while solver setup and synchronization/work stealing account for only a tiny fraction. This indicates that the implementation is not bottlenecked by explicit coordination overhead. Instead, the main cost lies in the parallel cube-solving phase, where threads repeatedly claim cubes, solve them under a bound and partial assignment, and either improve the incumbent, prove a cube infeasible, or return UNKNOWN after hitting the conflict budget. This is the region where most useful parallel work occurs, but it is also where the main scaling problems appear.</p>
+
+<p>The first issue is the irregular cube cost. Some cubes are pruned quickly, while others require much deeper CDCL exploration, so the workload is highly imbalanced. Work stealing helps by allowing idle threads to take work from busier ones, but it cannot eliminate the long tail entirely because some cubes are fundamentally much harder than others. The second issue is that each worker still runs a full Glucose solver instance. Each thread maintains its own clause database, watched-literal structures, trail, learned clauses, and heuristic state, so the total working set grows roughly linearly with thread count. This replicated state does not appear as synchronization overhead, but it is one of the central reasons the implementation becomes harder to scale: once several full CDCL solver instances are active at once, the pressure on caches and memory bandwidth rises sharply. Profiler data shows falling IPC together with rising cache misses, LLC misses, and memory traffic, strongly indicating that the implementation becomes increasingly memory-bound rather than compute-bound. This matches the structure of the solver: the useful arithmetic per thread is modest, while CDCL repeatedly traverses large clause and watch-list structures with irregular access patterns that compete heavily for the shared cache hierarchy.</p>
+
+<p>From this breakdown, the largest room for improvement lies in three areas. First, the serial seed phase should be reduced or parallelized. Because it is fully sequential, any reduction here directly improves total runtime regardless of thread count. Second, the quality of the cubes could be improved. Better cubes would create subproblems with more balanced difficulty, reducing the long tail and allowing work stealing to be more effective. Third, the memory footprint per worker should be reduced if possible. Since the dominant parallel cost appears to be replicated CDCL search rather than explicit synchronization, future gains are more likely to come from lowering memory traffic than from further reducing atomic or queue overhead.</p>
+
+<h2>References</h2>
+<ol class="references">
+  <li>Ruben Martins, Saurabh Joshi, Vasco Manquinho, Inês Lynce. "On Using Incremental Encodings in Unsatisfiability-based MaxSAT Solving." <em>JSAT</em>, 2014.</li>
+  <li>Ruben Martins, Vasco Manquinho, Inês Lynce. "Open-WBO: A Modular MaxSAT Solver." <em>SAT 2014</em>. DOI: 10.1007/978-3-319-09284-3_33</li>
+  <li>Ruben Martins, Vasco Manquinho, Inês Lynce. "Parallel Search for Maximum Satisfiability." <em>AI Communications</em>, 2012. DOI: 10.3233/AIC-2012-0517</li>
+  <li>Ruben Martins, Vasco Manquinho, Inês Lynce. "Clause Sharing in Parallel MaxSAT." <em>LION 2012</em>.</li>
+  <li>Youssef Hamadi, Said Jabbour, Lakhdar Sais. "Control-based Clause Sharing in Parallel SAT Solving." <em>Microsoft Research Technical Report</em>, 2009.</li>
+  <li>Marijn J. H. Heule, Oliver Kullmann, Siert Wieringa, Armin Biere. "Cube and Conquer: Guiding CDCL SAT Solvers by Lookaheads." <em>HVC 2011</em>. DOI: 10.1007/978-3-642-34188-5_8</li>
+</ol>
+
+<h2>Distribution of Work</h2>
+<p>Both of us worked on this project with equal contributions (50%-50%). We both independently worked on different iterations of the code, taking turns implementing. After every iteration, we would discuss concerns and flaws we noticed to better motivate the next iteration. The person who implemented the solution was responsible for collecting the relevant data. We collaboratively wrote the reports and the midways.</p>
+
+</body>
+</html>
